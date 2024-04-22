@@ -5,6 +5,12 @@ date: "2024-04-22"
 output: html_document
 ---
 
+Balázs Koncz, Gergő M. Balogh, Máté Manczinger
+A journey to your self: the vague definition of immune self and its practical implications
+PNAS
+2024
+DOI: 
+
 #Setup
 
 ```{r}
