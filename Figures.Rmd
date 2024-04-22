@@ -5,26 +5,348 @@ date: "2024-04-22"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+#Setup
+
+```{r}
+Packages <- c("readr", "tidyverse", "data.table", "magrittr")
+Packages <- c("magrittr", "dplyr", "data.table", "stringr", "ggplot2", "Rfast", "fastmatch", "forcats", "ggpubr", "tidyr", "ggseqlogo", "protr", "ComplexHeatmap", "readxl", "pbapply", "Hmisc", "seqinr")
+# Packages <- c("magrittr", "dplyr", "data.table", "tidyr", , "Hmisc", , "tibble", "protr", "ComplexHeatmap", "stringr", "readr")
+lapply(Packages, require, character.only = TRUE)
+rm(Packages)
+options(dplyr.summarise.inform = FALSE)
+
 ```
 
-## R Markdown
+#I. All T cell assays (pos + neg)
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+```{r}
+firstrow <- readr::read_csv("D:/CloudStation/iedb/2023_04_11/tcell_full_v3.csv", n_max = 0) %>% names()
+firstrow = gsub("\\..*", "", firstrow)
+firstrow = gsub(" ", "\\.", firstrow)
+tcell_full = fread("D:/CloudStation/iedb/2023_04_11/tcell_full_v3.csv", skip = 1, check.names = T) #456,915
+header = paste(firstrow, str_replace_all(string = colnames(tcell_full), pattern = "\\.[:digit:]+", replacement = ""), sep = ".")
+colnames(tcell_full) = header
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+selcol = match(c("Epitope.Source.Organism", "Epitope.Species", "1st.immunogen.Name", "1st.immunogen.Reference.Name", "1st.immunogen.Source.Organism", "1st.immunogen.Species", "in.vitro.immunogen.Source.Organism", "in.vitro.immunogen.Species", "Assay.Antigen.Source.Organism", "Assay.Antigen.Species"), colnames(tcell_full))
 
-```{r cars}
-summary(cars)
+tcell_filt_dengue = tcell_full %>% 
+  filter_at(.vars = selcol, .vars_predicate = any_vars(grepl("dengue", ., ignore.case = T))) %>% #13,014
+  filter(nchar(Epitope.Name) == 9) %>% #2087
+  filter(grepl("HLA-A\\*|HLA-B\\*|HLA-C\\*", MHC.Restriction.Name)) %>%  #1630
+  select(MHC.Restriction.Name, Epitope.Name) %>% 
+  set_colnames(c("allele", "peptide")) %>% 
+  mutate(organism = "Dengue")
+
+tcell_filt_sars = tcell_full %>% 
+  filter_at(.vars = selcol, .vars_predicate = any_vars(grepl("SARS-CoV2|Severe acute respiratory syndrome coronavirus 2", ., ignore.case = T))) %>% #20,125
+  filter(nchar(Epitope.Name) == 9) %>% #5594
+  filter(grepl("HLA-A\\*|HLA-B\\*|HLA-C\\*", MHC.Restriction.Name)) %>%  #4,632
+  select(MHC.Restriction.Name, Epitope.Name) %>% 
+  set_colnames(c("allele", "peptide")) %>% 
+  mutate(organism = "SARS")
+
+tcell_filt = rbind(tcell_filt_dengue, tcell_filt_sars)
+
+rm(tcell_full, tcell_filt_dengue, tcell_filt_sars, firstrow, header, selcol)
+
+pathogen_peptides = c("peptide", sort(unique(tcell_filt$peptide)))
+writeLines(pathogen_peptides, "objects/pathogen_peptides.txt")
 ```
 
-## Including Plots
+##Calculation
+###BLOSUM62 sequence similarity (full peptide, BL62 max, median)
+####Functions
 
-You can also embed plots, for example:
+```{r}
+create_db_proteome <- function(blast_folder, proteome_fasta_loc, peptide_length, db_name) {
+  proteome = protr::readFASTA(proteome_fasta_loc)
+  mers = lapply(proteome, FUN = function(z) substring(z, 1:(nchar(z)-(peptide_length - 1)), peptide_length:nchar(z)))
+  mers = unique(unlist(mers, use.names = F))
+  strings = rbind(paste0(">", mers), mers)
+  strings = as.vector(strings)
+  writeLines(strings, paste0(blast_folder, db_name, ".fasta"))
+  message("Makeblastdb application is curently produces BLAST databases from your proteome...")
+  system2(command = paste0(blast_folder, "makeblastdb.exe"), args = c(paste0("-in ", blast_folder, db_name, ".fasta"), "-dbtype prot", "-title epitopes"))
+  message(paste0("Database is created in ", blast_folder))
+}
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+blastp <- function(blast_folder, query_peptides, db_loc, out_loc, threads = 1, keep_query_fasta_peptides = "NO") {
+  strings = rbind(paste0(">", query_peptides), query_peptides)
+  strings = as.vector(strings)
+  writeLines(strings, paste0(blast_folder, "query_peptides.fasta"))
+  #message("blastp is already running...")
+  system2(command = paste0(blast_folder, "blastp.exe"), 
+          args = c(paste0("-query ", paste0(blast_folder, "query_peptides.fasta")), 
+                   paste0("-db ", db_loc), 
+                   paste0("-out ", out_loc),
+                   paste0("-num_threads ", threads),
+                   "-outfmt 6",
+                   "-task blastp-short",
+                   "-ungapped",
+                   "-comp_based_stats F",
+                   "-evalue 10000000",
+                   "-max_target_seqs 100"))
+  #message(paste0("Sequences were compared. The location of the output file: ", out_loc))
+  if(keep_query_fasta_peptides == "NO") unlink(paste0(blast_folder, "query_peptides.fasta"))
+}
+
+calcSeqSim = function(blastpout_loc) {
+  aLign = function(seq_1, seq_2, mtx = protr::AABLOSUM62, aas = colnames(protr::AABLOSUM62)) {
+    sum(mtx[cbind(fmatch(unlist(strsplit(seq_1, "")), aas), fmatch(unlist(strsplit(seq_2, "")), aas))])
+  }
+  #library(pbapply)
+  library(fastmatch)
+  library(future.apply)
+  blastpout = read.table(blastpout_loc, header = F, stringsAsFactors = F)
+  mers = unique(blastpout$V1)
+  future_sapply(mers, function(x) {
+    max(sapply(blastpout$V2[blastpout$V1 == x], function(y) {
+      aLign(x, y)/(sqrt((aLign(x, x))*(aLign(y, y))))
+    }), na.rm = T)
+  })
+}
+
+calcSeqSimMED = function(blastpout_loc) {
+  aLign = function(seq_1, seq_2, mtx = protr::AABLOSUM62, aas = colnames(protr::AABLOSUM62)) {
+    sum(mtx[cbind(fmatch(unlist(strsplit(seq_1, "")), aas), fmatch(unlist(strsplit(seq_2, "")), aas))])
+  }
+  library(fastmatch)
+  library(future.apply)
+  blastpout = read.table(blastpout_loc, header = F, stringsAsFactors = F)
+  mers = unique(blastpout$V1)
+  future_sapply(mers, function(x) {
+    median(sapply(blastpout$V2[blastpout$V1 == x], function(y) {
+      aLign(x, y)/(sqrt((aLign(x, x))*(aLign(y, y))))
+    }), na.rm = T)
+  })
+}
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+####Calculation
+
+```{r}
+create_db_proteome(blast_folder = "C:/NCBI/ncbi-blast-2.12.0+/bin/", proteome_fasta_loc = "objects/uniprot-compressed_true_download_true_format_fasta_query__28proteome-2023.04.11-08.26.57.89.fasta", peptide_length = 9, db_name = "human_proteome_20230411_9mers")
+
+peps = unique(tcell_filt$peptide)
+blastp(blast_folder = "C:/NCBI/ncbi-blast-2.12.0+/bin/", query_peptides = peps, db_loc = "C:/NCBI/ncbi-blast-2.12.0+/bin/human_proteome_20230411_9mers.fasta", out_loc = "objects/blastpout_ss_iedb_dengue_sars_peps2261", threads = 6)
+
+ss_scores = calcSeqSim(blastpout_loc = "objects/blastpout_ss_iedb_dengue_sars_peps2261")
+save(ss_scores, file = "objects/sequence_similarity_values_peps2261")
+ss_scores = calcSeqSimMED(blastpout_loc = "objects/blastpout_ss_iedb_dengue_sars_peps2261")
+save(ss_scores, file = "objects/sequence_similarityMED_values_peps2261")
+rm(blastp, calcSeqSim, calcSeqSimMED, create_db_peptides, create_db_proteome, peps, ss_scores)
+```
+
+###Dissimilarity
+
+
+```{r}
+v = unique(tcell_filt$peptide)
+v = v[sapply(v, protr::protcheck)]
+names(v) <- 1:length(v) %>% as.character()
+
+sdt <- v %>%
+  data.table::as.data.table() %>%
+  .[, nmer_id := names(v)]
+
+AA <- Biostrings::AAStringSet(v, use.names = TRUE)
+Biostrings::writeXStringSet(AA, file = "C:/NCBI/ncbi-blast-2.12.0+/bin/dissimilarity_fasta_iedb_dengue_sars_peps2261.fa", format = "fasta")
+
+
+# blast call with the parameters from Luksza model, E value, matrix, and gap costs, https://github.com/leeprichman/Richman_2019_Cell_Systems/blob/master/Figure%203/Fig3CDE.R
+#blastp -query dissimilarity_fasta_iedb_dengue_sars_peps2261.fa -db human_proteome_9mers.fasta -out iedb_dengue_sars_peps2261_dissim.csv -num_threads 7 -matrix BLOSUM62 -gapopen 11 -gapextend 1 -evalue 100000000 -outfmt "10 qseqid sseqid qseq qstart qend sseq sstart send length mismatch pident evalue bitscore"
+
+blastdt <- "C:/NCBI/ncbi-blast-2.12.0+/bin/iedb_dengue_sars_peps2261_dissim.csv" %>% fread
+
+blastdt %>% data.table::setnames(names(.),
+                                 c("nmer_id",
+                                   "self_anno",
+                                   "nmer",
+                                   "q_start",
+                                   "q_stop",
+                                   "WT.peptide",
+                                   "s_start",
+                                   "s_end",
+                                   "overlap_length",
+                                   "mismatch_length",
+                                   "pident",
+                                   "evalue",
+                                   "bitscore"))
+# shrink table for memory constraints
+blastdt <- blastdt[, .SD %>% unique, .SDcols = c("nmer_id", "self_anno", "WT.peptide", "nmer")]
+
+# remove gapped alignments, necessary given permissive blast params
+blastdt <- blastdt[, WT.peptide := WT.peptide %>% stringr::str_replace_all(pattern = "-|\\*|U", replacement = "")] %>%
+  .[, nmer := nmer %>% stringr::str_replace_all(pattern = "-|\\*|U", replacement = "")] %>%
+  .[!is.na(WT.peptide) & !is.na(nmer)] %>%
+  .[nchar(nmer) == nchar(WT.peptide)]
+
+# get table of alignment lengths per nmer
+blastdt[, align_l := nchar(WT.peptide)]
+
+
+# this is memory intense, lets split it up and stitch it back
+suppressWarnings(
+  blastdt <- blastdt %>% split(1:(nrow(blastdt) / 100))
+)
+
+blastdt <- lapply(blastdt %>% seq_along(), function(i) {
+  fn <- paste("objects/blastdt_obs/blastdt_", i, ".txt", sep = "")
+
+  blastdt[[i]] %>% data.table::fwrite(fn, sep = "\t")
+
+  return(fn)
+}) %>% unlist()
+
+
+
+make_sw_alignment <- function(col1,
+                              col2,
+                              gap_open = -11,
+                              gap_extend = -1) {
+  al <- Biostrings::pairwiseAlignment(col1, col2,
+                                      substitutionMatrix = "BLOSUM62",
+                                      gapOpening = gap_open,
+                                      gapExtension = gap_extend,
+                                      type = "local",
+                                      scoreOnly = TRUE
+  )
+
+  if (length(al) == 0) al <- as.numeric(NA)
+
+  return(al)
+}
+
+pblapply(blastdt %>% seq_along(), function(i) {
+
+  print(paste("Alignment subset", i, "of", length(blastdt)))
+
+  b <- blastdt[i] %>% data.table::fread()
+
+  b[, SW := make_sw_alignment(nmer, WT.peptide)]
+
+  b %>% data.table::fwrite(blastdt[i], sep = "\t")
+
+  return(NULL)
+})
+
+blastdt <- lapply(blastdt, function(f) {
+  dt <- data.table::fread(f)
+
+  file.remove(f)
+
+  return(dt)
+}) %>% data.table::rbindlist(use.names = TRUE, fill = TRUE)
+
+#message("Running partition function...")
+
+
+modeleR <- function(als, a = aval, k = kval) {
+  be <- -k * (a - als)
+  sumexp <- sum(exp(be))
+  Zk <- 1 + sumexp
+  R <- sumexp / Zk
+  R <- 1 - R
+  return(R)
+}
+
+kval = 4.86936
+aval = 32 #I modified this value from 34 to 32 (according to the Luksza article) https://github.com/andrewrech/antigen.garnish/blob/main/R/antigen.garnish_predict.R
+
+blastdt[, dissimilarity := SW %>% modeleR(), by = "nmer_id"]
+
+blastdt <- blastdt[, .SD %>% unique(), .SDcols = c("nmer_id", "dissimilarity")]
+
+sdt[, nmer_id := as.character(nmer_id)]
+blastdt[, nmer_id := as.character(nmer_id)]
+
+sdt <- merge(sdt, blastdt, by = "nmer_id")
+
+sdt %>% data.table::setnames(".", "nmer")
+
+sdt = sdt[, .SD %>% unique(), .SDcols = c("nmer", "dissimilarity")]
+save(sdt, file = "objects/dissimilarity_values")
+
+rm(AA, blastdt, sdt, aval, kval, v, make_sw_alignment, modeleR)
+```
+
+###Mayer
+Nb. of mismatched amino acids
+
+```{r}
+blastpout = fread("objects/blastpout_ss_iedb_dengue_sars_peps2261")
+blastpout2 = blastpout %>% group_by(qseqid) %>% slice(which.min(strdist))
+save(aadifs, file = "objects/aadifs_mayer")
+rm(blastpout, mers, aadifs)
+```
+
+###TCEMfreq
+
+```{r}
+proteome = protr::readFASTA("objects/uniprot-compressed_true_download_true_format_fasta_query__28proteome-2023.04.11-08.26.57.89.fasta")
+mers9 = lapply(proteome, FUN = function(z) substring(z, 1:(nchar(z)-(9 - 1)), 9:nchar(z)))
+mers9 = unlist(mers9, use.names = F)
+mers9 = mers9[nchar(mers9) == 9]
+tcems = substr(mers9,4,8)
+tcems = tcems[!grepl("U", tcems)]
+tcemfreq = Table(tcems)
+save(tcemfreq, file = "objects/tcemfreq")
+rm(proteome, mers9, tcemfreq, tcems)
+```
+
+##Luksa Non-selfness
+Run in PyCharm
+
+```{r}
+iedb_fasta_original = read.fasta(file = "D:/CloudStation/PycharmProjects/NeoantigenLuksza/data/iedb.fasta", as.string = TRUE, seqtype = "AA", whole.header = T)
+iedb_fasta_filt = lapply(iedb_fasta_original, function(x) x[!x %in% pathogen_peptides])
+iedb_fasta_filt = iedb_fasta_filt[lengths(iedb_fasta_filt) > 0]
+
+write.fasta(iedb_fasta_filt, names(iedb_fasta_filt), "objects/non_selfness_iedb_filt.fasta")
+
+#system2(command = "C:/NCBI/ncbi-blast-2.12.0+/bin/makeblastdb.exe", args = c("-in objects/non_selfness_iedb_filt.fasta", "-dbtype prot"))
+rm(iedb_fasta_filt, iedb_fasta_original, pathogen_peptides)
+```
+
+##Add to dataset
+
+```{r}
+tcell_filt = unique(tcell_filt)
+
+load("objects/sequence_similarity_values_peps2261")
+tcell_filt$bl62ssMax = ss_scores[fmatch(tcell_filt$peptide, names(ss_scores))]
+rm(ss_scores)
+
+load("objects/sequence_similarityMED_values_peps2261")
+tcell_filt$bl62ssMed = ss_scores[fmatch(tcell_filt$peptide, names(ss_scores))]
+rm(ss_scores)
+
+load("objects/dissimilarity_values")
+tcell_filt$dissim = sdt$dissimilarity[fmatch(tcell_filt$peptide, sdt$nmer)]
+rm(sdt)
+
+load("objects/aadifs_mayer")
+tcell_filt$aadif = aadifs[fmatch(tcell_filt$peptide,names(aadifs))]
+rm(aadifs)
+
+tcell_filt$exactmatch = ifelse(tcell_filt$aadif == 0, 1, 0)
+
+load("objects/tcemfreq")
+tcell_filt$tcemfreq = tcemfreq[fmatch(substr(tcell_filt$peptide,4,8), names(tcemfreq))]
+tcell_filt$tcemfreq[is.na(tcell_filt$tcemfreq)] = 0
+rm(tcemfreq)
+
+nonselfness = read.table("objects/non_selfness_R_pathogen_peptides.csv", header = T, sep = "\t")
+nonselfness = nonselfness[,c(1,3)]
+colnames(nonselfness) = c("peptide", "nonselfness")
+
+tcell_filt$nonselfness = nonselfness$nonselfness[fmatch(tcell_filt$peptide, nonselfness$peptide)]
+rm(nonselfness)
+
+save(tcell_filt, file = "objects/tcell_filt")
+```
+
+##Results
+###Correlations
+
