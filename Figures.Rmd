@@ -8,8 +8,8 @@ output: html_document
 #Setup
 
 ```{r}
-Packages <- c("readr", "tidyverse", "data.table", "magrittr")
-Packages <- c("magrittr", "dplyr", "data.table", "stringr", "ggplot2", "Rfast", "fastmatch", "forcats", "ggpubr", "tidyr", "ggseqlogo", "protr", "ComplexHeatmap", "readxl", "pbapply", "Hmisc", "seqinr")
+Packages <- c("readr", "tidyverse", "data.table", "magrittr", "fastmatch", "readxl")
+#Packages <- c("magrittr", "dplyr", "data.table", "stringr", "ggplot2", "Rfast", "fastmatch", "forcats", "ggpubr", "tidyr", "ggseqlogo", "protr", "ComplexHeatmap", "readxl", "pbapply", "Hmisc", "seqinr")
 # Packages <- c("magrittr", "dplyr", "data.table", "tidyr", , "Hmisc", , "tibble", "protr", "ComplexHeatmap", "stringr", "readr")
 lapply(Packages, require, character.only = TRUE)
 rm(Packages)
@@ -20,7 +20,7 @@ options(dplyr.summarise.inform = FALSE)
 #I. All T cell assays (pos + neg)
 
 ```{r}
-firstrow <- readr::read_csv("D:/CloudStation/iedb/2023_04_11/tcell_full_v3.csv", n_max = 0) %>% names()
+firstrow <- read_csv("D:/CloudStation/iedb/2023_04_11/tcell_full_v3.csv", n_max = 0) %>% names() #https://www.iedb.org/database_export_v3.php
 firstrow = gsub("\\..*", "", firstrow)
 firstrow = gsub(" ", "\\.", firstrow)
 tcell_full = fread("D:/CloudStation/iedb/2023_04_11/tcell_full_v3.csv", skip = 1, check.names = T) #456,915
@@ -53,7 +53,7 @@ pathogen_peptides = c("peptide", sort(unique(tcell_filt$peptide)))
 writeLines(pathogen_peptides, "objects/pathogen_peptides.txt")
 ```
 
-##Calculation
+##Similarity calculation
 ###BLOSUM62 sequence similarity (full peptide, BL62 max, median)
 ####Functions
 
@@ -135,7 +135,7 @@ ss_scores = calcSeqSim(blastpout_loc = "objects/blastpout_ss_iedb_dengue_sars_pe
 save(ss_scores, file = "objects/sequence_similarity_values_peps2261")
 ss_scores = calcSeqSimMED(blastpout_loc = "objects/blastpout_ss_iedb_dengue_sars_peps2261")
 save(ss_scores, file = "objects/sequence_similarityMED_values_peps2261")
-rm(blastp, calcSeqSim, calcSeqSimMED, create_db_peptides, create_db_proteome, peps, ss_scores)
+
 ```
 
 ###Dissimilarity
@@ -295,20 +295,6 @@ save(tcemfreq, file = "objects/tcemfreq")
 rm(proteome, mers9, tcemfreq, tcems)
 ```
 
-##Luksa Non-selfness
-Run in PyCharm
-
-```{r}
-iedb_fasta_original = read.fasta(file = "D:/CloudStation/PycharmProjects/NeoantigenLuksza/data/iedb.fasta", as.string = TRUE, seqtype = "AA", whole.header = T)
-iedb_fasta_filt = lapply(iedb_fasta_original, function(x) x[!x %in% pathogen_peptides])
-iedb_fasta_filt = iedb_fasta_filt[lengths(iedb_fasta_filt) > 0]
-
-write.fasta(iedb_fasta_filt, names(iedb_fasta_filt), "objects/non_selfness_iedb_filt.fasta")
-
-#system2(command = "C:/NCBI/ncbi-blast-2.12.0+/bin/makeblastdb.exe", args = c("-in objects/non_selfness_iedb_filt.fasta", "-dbtype prot"))
-rm(iedb_fasta_filt, iedb_fasta_original, pathogen_peptides)
-```
-
 ##Add to dataset
 
 ```{r}
@@ -337,16 +323,446 @@ tcell_filt$tcemfreq = tcemfreq[fmatch(substr(tcell_filt$peptide,4,8), names(tcem
 tcell_filt$tcemfreq[is.na(tcell_filt$tcemfreq)] = 0
 rm(tcemfreq)
 
-nonselfness = read.table("objects/non_selfness_R_pathogen_peptides.csv", header = T, sep = "\t")
-nonselfness = nonselfness[,c(1,3)]
-colnames(nonselfness) = c("peptide", "nonselfness")
-
-tcell_filt$nonselfness = nonselfness$nonselfness[fmatch(tcell_filt$peptide, nonselfness$peptide)]
-rm(nonselfness)
-
 save(tcell_filt, file = "objects/tcell_filt")
 ```
 
-##Results
-###Correlations
+#II. Neoepitopes
+
+##Dataset
+
+```{r}
+tesla_data = read_excel("mmc4.xlsx") #https://doi.org/10.1016/j.immuni.2023.09.002
+tesla_data %<>% select(MHC, ALT_EPI_SEQ) %>% filter(nchar(ALT_EPI_SEQ) == 9) %>% set_colnames(c("allele", "peptide"))
+neopeptides_tesla = c("peptide", sort(unique(tesla_data$peptide)))
+writeLines(neopeptides_tesla, "objects/neopeptides_tesla.txt")
+```
+
+##Similarity calculation
+###BLOSUM62 sequence similarity (full peptide, BL62 max, median)
+
+```{r}
+peps = unique(tesla_data$peptide)
+
+blastp(blast_folder = "C:/NCBI/ncbi-blast-2.12.0+/bin/", query_peptides = peps, db_loc = "C:/NCBI/ncbi-blast-2.12.0+/bin/human_proteome_20230411_9mers.fasta", out_loc = "objects/blastpout_ss_tesla_neoeps_301", threads = 6)
+ss_scores = calcSeqSim(blastpout_loc = "objects/blastpout_ss_tesla_neoeps_301")
+save(ss_scores, file = "objects/sequence_similarity_values_neoeps301")
+ss_scores = calcSeqSimMED(blastpout_loc = "objects/blastpout_ss_tesla_neoeps_301")
+save(ss_scores, file = "objects/sequence_similarityMED_values_neoeps301")
+
+```
+
+###Dissimilarity
+
+```{r}
+v = unique(tesla_data$peptide)
+v = v[sapply(v, protr::protcheck)]
+names(v) <- 1:length(v) %>% as.character()
+
+sdt <- v %>%
+  data.table::as.data.table() %>%
+  .[, nmer_id := names(v)]
+
+AA <- Biostrings::AAStringSet(v, use.names = TRUE)
+Biostrings::writeXStringSet(AA, file = "C:/NCBI/ncbi-blast-2.12.0+/bin/dissimilarity_fasta_tesla_neoeps301.fa", format = "fasta")
+
+
+# blast call with the parameters from Luksza model, E value, matrix, and gap costs, https://github.com/leeprichman/Richman_2019_Cell_Systems/blob/master/Figure%203/Fig3CDE.R
+#blastp -query dissimilarity_fasta_tesla_neoeps301.fa -db human_proteome_9mers.fasta -out tesla_neoeps301_dissim.csv -num_threads 7 -matrix BLOSUM62 -gapopen 11 -gapextend 1 -evalue 100000000 -outfmt "10 qseqid sseqid qseq qstart qend sseq sstart send length mismatch pident evalue bitscore"
+
+blastdt <- "C:/NCBI/ncbi-blast-2.12.0+/bin/tesla_neoeps301_dissim.csv" %>% fread
+
+blastdt %>% data.table::setnames(names(.),
+                                 c("nmer_id",
+                                   "self_anno",
+                                   "nmer",
+                                   "q_start",
+                                   "q_stop",
+                                   "WT.peptide",
+                                   "s_start",
+                                   "s_end",
+                                   "overlap_length",
+                                   "mismatch_length",
+                                   "pident",
+                                   "evalue",
+                                   "bitscore"))
+# shrink table for memory constraints
+blastdt <- blastdt[, .SD %>% unique, .SDcols = c("nmer_id", "self_anno", "WT.peptide", "nmer")]
+
+# remove gapped alignments, necessary given permissive blast params
+blastdt <- blastdt[, WT.peptide := WT.peptide %>% stringr::str_replace_all(pattern = "-|\\*|U", replacement = "")] %>%
+  .[, nmer := nmer %>% stringr::str_replace_all(pattern = "-|\\*|U", replacement = "")] %>%
+  .[!is.na(WT.peptide) & !is.na(nmer)] %>%
+  .[nchar(nmer) == nchar(WT.peptide)]
+
+# get table of alignment lengths per nmer
+blastdt[, align_l := nchar(WT.peptide)]
+
+
+# this is memory intense, lets split it up and stitch it back
+suppressWarnings(
+  blastdt <- blastdt %>% split(1:(nrow(blastdt) / 100))
+)
+
+blastdt <- lapply(blastdt %>% seq_along(), function(i) {
+  fn <- paste("objects/blastdt_obs/blastdt_", i, ".txt", sep = "")
+
+  blastdt[[i]] %>% data.table::fwrite(fn, sep = "\t")
+
+  return(fn)
+}) %>% unlist()
+
+
+
+make_sw_alignment <- function(col1,
+                              col2,
+                              gap_open = -11,
+                              gap_extend = -1) {
+  al <- Biostrings::pairwiseAlignment(col1, col2,
+                                      substitutionMatrix = "BLOSUM62",
+                                      gapOpening = gap_open,
+                                      gapExtension = gap_extend,
+                                      type = "local",
+                                      scoreOnly = TRUE
+  )
+
+  if (length(al) == 0) al <- as.numeric(NA)
+
+  return(al)
+}
+
+pblapply(blastdt %>% seq_along(), function(i) {
+
+  print(paste("Alignment subset", i, "of", length(blastdt)))
+
+  b <- blastdt[i] %>% data.table::fread()
+
+  b[, SW := make_sw_alignment(nmer, WT.peptide)]
+
+  b %>% data.table::fwrite(blastdt[i], sep = "\t")
+
+  return(NULL)
+})
+
+blastdt <- lapply(blastdt, function(f) {
+  dt <- data.table::fread(f)
+
+  file.remove(f)
+
+  return(dt)
+}) %>% data.table::rbindlist(use.names = TRUE, fill = TRUE)
+
+#message("Running partition function...")
+
+
+modeleR <- function(als, a = aval, k = kval) {
+  be <- -k * (a - als)
+  sumexp <- sum(exp(be))
+  Zk <- 1 + sumexp
+  R <- sumexp / Zk
+  R <- 1 - R
+  return(R)
+}
+
+kval = 4.86936
+aval = 32
+
+blastdt[, dissimilarity := SW %>% modeleR(), by = "nmer_id"]
+
+blastdt <- blastdt[, .SD %>% unique(), .SDcols = c("nmer_id", "dissimilarity")]
+
+sdt[, nmer_id := as.character(nmer_id)]
+blastdt[, nmer_id := as.character(nmer_id)]
+
+sdt <- merge(sdt, blastdt, by = "nmer_id")
+
+sdt %>% data.table::setnames(".", "nmer")
+
+sdt = sdt[, .SD %>% unique(), .SDcols = c("nmer", "dissimilarity")]
+save(sdt, file = "objects/dissimilarity_values_neoeps")
+
+rm(AA, blastdt, sdt, aval, kval, v, make_sw_alignment, modeleR)
+```
+
+###Mayer
+Nb. of mismatched amino acids
+
+```{r}
+blastpout = fread("objects/blastpout_ss_tesla_neoeps_301")
+mers = unique(blastpout$V1)
+aadifs = pbsapply(mers, function(x) {
+  tempdf = blastpout[blastpout$V1 == x,]
+  min(apply(tempdf, 1, function(z) sum(Reduce("!=", strsplit(c(z[1], z[2]), split = "")))))
+})
+save(aadifs, file = "objects/aadifs_mayer_neoeps")
+
+
+# library(stringdist)
+# colnames(blastpout) = c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore")
+# blastpout$strdist = apply(blastpout, 1, function(x) {
+#   stringdist(a = x[1], b = x[2], method = "hamming")
+# })
+# blastpout2 = blastpout %>% group_by(qseqid) %>% slice(which.min(strdist)) 
+# 
+# strdist = blastpout2$strdist
+# names(strdist) = blastpout2$qseqid
+# 
+# View(cbind(aadifs, strdist[match(names(aadifs), names(strdist))]))
+
+rm(blastpout, mers, aadifs)
+```
+
+##Add to dataset
+
+```{r}
+tesla_data = unique(tesla_data)
+
+load("objects/sequence_similarity_values_neoeps301")
+tesla_data$bl62ssMax = ss_scores[fmatch(tesla_data$peptide, names(ss_scores))]
+rm(ss_scores)
+
+load("objects/sequence_similarityMED_values_neoeps301")
+tesla_data$bl62ssMed = ss_scores[fmatch(tesla_data$peptide, names(ss_scores))]
+rm(ss_scores)
+
+load("objects/dissimilarity_values_neoeps")
+tesla_data$dissim = sdt$dissimilarity[fmatch(tesla_data$peptide, sdt$nmer)]
+rm(sdt)
+
+load("objects/aadifs_mayer_neoeps")
+tesla_data$aadif = aadifs[fmatch(tesla_data$peptide,names(aadifs))]
+rm(aadifs)
+
+tesla_data$exactmatch = ifelse(tesla_data$aadif == 0, 1, 0)
+
+load("objects/tcemfreq")
+tesla_data$tcemfreq = tcemfreq[fmatch(substr(tesla_data$peptide,4,8), names(tcemfreq))]
+tesla_data$tcemfreq[is.na(tesla_data$tcemfreq)] = 0
+rm(tcemfreq)
+
+save(tesla_data, file = "objects/tesla_data")
+```
+
+#III. FIGURES
+
+##Fig1 Correlation plot
+###C1 Pathogen
+
+```{r}
+load("objects/tcell_filt")
+tcell_filt %<>% select(peptide, bl62ssMax, bl62ssMed, dissim, aadif, tcemfreq) %>% unique()
+colnames(tcell_filt) = c("peptide", "BL62 similarity\nscore (max)", "BL62 similarity\nscore (med)", "Dissimilarity", "Hamming distance", "TCEM frequency")
+
+cordf <- expand.grid(Var1 = colnames(tcell_filt)[2:6], Var2 = colnames(tcell_filt)[2:6], stringsAsFactors = F)
+cordf = cordf[c(1,6:7,11:13,16:19,21:25),]
+#cordf = cordf[c(1:6,8:12,15:18,22:24,29,30,36),]
+cordf$sp_rho = unname(apply(cordf, 1, function(x) cor.test(tcell_filt %>% pull(x[1]), tcell_filt %>% pull(x[2]), type = "spearman")$estimate))
+cordf$sp_pvalue = unname(apply(cordf, 1, function(x) cor.test(tcell_filt %>% pull(x[1]), tcell_filt %>% pull(x[2]), type = "spearman")$p.value))
+
+#ALMOST GOOD
+cordf$label = apply(cordf, 1, function(x) {
+  if(as.numeric(x[3]) == 1) {
+    out = ""
+  } else if(as.numeric(x[4]) < 1e-3) {
+    out = paste0("paste(\"",
+           round(as.numeric(x[3]),2),
+           "\n",
+           "(",
+           strsplit(format(as.numeric(x[4]),digits = 2, scientific = T), "e")[[1]][1],
+           " x \",10 ^ ", 
+           as.numeric(strsplit(format(as.numeric(x[4]), digits = 2, scientific = T), "e")[[1]][2]),
+           ",\")\")")
+  } else {
+    out = paste0("paste(\" ", 
+           round(as.numeric(x[3]),2), 
+           "\n",
+           "(", 
+           round(as.numeric(x[4]),3), 
+           ")", 
+           "\")")
+  }
+  out
+})
+
+cordf$sp_rho[cordf$Var1 == cordf$Var2] = NA
+
+cordf$Var1 = factor(cordf$Var1, levels = c("BL62 similarity\nscore (max)", "BL62 similarity\nscore (med)", "Dissimilarity", "Hamming distance", "TCEM frequency"))
+cordf$Var2 = factor(cordf$Var2, levels = c("BL62 similarity\nscore (max)", "BL62 similarity\nscore (med)", "Dissimilarity", "Hamming distance", "TCEM frequency"))
+
+fig_cor_path = ggplot(cordf, aes(Var2, Var1, fill = sp_rho)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient2(low = "#3C5488B2", high = "#DC0000B2", mid = "white", midpoint = 0, limit = c(-1,1), space = "Lab", name = "Spearman Correlation", na.value = "white") +
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(position = "left") +
+  theme_minimal() + 
+  coord_fixed() +
+  geom_text(aes(Var2, Var1, label = label), color = "black", size = 3, parse = T) +
+  labs(title = "Pathogen peptides") +
+  theme(title = element_text(size = 14),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(size = 12, angle = 90, hjust = 0),
+        axis.text.y = element_text(size = 12, hjust = 1),
+        panel.grid.major = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position.inside = "none")
+fig_cor_path
+
+```
+
+###C2 Neoepitopes
+
+```{r}
+load("objects/tesla_data")
+tesla_data %<>% select(peptide, bl62ssMax, bl62ssMed, dissim, aadif, tcemfreq) %>% unique()
+colnames(tesla_data) = c("peptide", "BL62 similarity\nscore (max)", "BL62 similarity\nscore (med)", "Dissimilarity", "Hamming distance", "TCEM frequency")
+
+
+cordf_tesla <- expand.grid(Var1 = colnames(tesla_data)[2:6], Var2 = colnames(tesla_data)[2:6], stringsAsFactors = F)
+cordf_tesla = cordf_tesla[c(1,6:7,11:13,16:19,21:25),]
+cordf_tesla$sp_rho = unname(apply(cordf_tesla, 1, function(x) cor.test(tesla_data %>% pull(x[1]), tesla_data %>% pull(x[2]), type = "spearman")$estimate))
+cordf_tesla$sp_pvalue = unname(apply(cordf_tesla, 1, function(x) cor.test(tesla_data %>% pull(x[1]), tesla_data %>% pull(x[2]), type = "spearman")$p.value))
+
+cordf_tesla$label = apply(cordf_tesla, 1, function(x) {
+  if(as.numeric(x[3]) == 1) {
+    out = ""
+  } else if(as.numeric(x[4]) < 1e-3) {
+    paste0("paste(\"",
+           round(as.numeric(x[3]),2),
+           "\n",
+           "(",
+           strsplit(format(as.numeric(x[4]),digits = 2, scientific = T), "e")[[1]][1],
+           " x \",10 ^ ", 
+           as.numeric(strsplit(format(as.numeric(x[4]), digits = 2, scientific = T), "e")[[1]][2]),
+           ",\")\")")
+  } else {
+    paste0("paste(\" ", 
+           round(as.numeric(x[3]),2), 
+           "\n",
+           "(", 
+           round(as.numeric(x[4]),3), 
+           ")", 
+           "\")")
+  }
+})
+
+cordf_tesla$sp_rho[cordf_tesla$Var1 == cordf_tesla$Var2] = NA
+
+cordf_tesla$Var1 = factor(cordf_tesla$Var1, levels = c("BL62 similarity\nscore (max)", "BL62 similarity\nscore (med)", "Dissimilarity", "Hamming distance", "TCEM frequency"))
+cordf_tesla$Var2 = factor(cordf_tesla$Var2, levels = c("BL62 similarity\nscore (max)", "BL62 similarity\nscore (med)", "Dissimilarity", "Hamming distance", "TCEM frequency"))
+fig_cor_neoep = ggplot(cordf_tesla, aes(Var2, Var1, fill = sp_rho)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient2(low = "#3C5488B2", high = "#DC0000B2", mid = "white", midpoint = 0, limit = c(-1,1), space = "Lab", name = "Spearman Correlation", na.value = "white") +
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(position = "left") +
+  theme_minimal() + 
+  coord_fixed() +
+  geom_text(aes(Var2, Var1, label = label), color = "black", size = 3, parse = T) +
+  labs(title = "Neopeptides") +
+  theme(title = element_text(size = 14),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(size = 12, angle = 90, hjust = 0),
+        axis.text.y = element_text(size = 12, hjust = 1),
+        panel.grid.major = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks = element_blank(), 
+        legend.title = element_text(size = 12, angle = 90, vjust = 1, hjust = .5),
+        legend.position.inside = c(0.9, 0.16)) +
+        #legend.justification = c(1, 0)),
+  guides(fill = guide_colorbar(title = "Spearman's rho", title.position = "left", direction = "vertical", barwidth = 1, barheight = 7))
+fig_cor_neoep
+
+ggarrange(plotlist = list(fig_cor_path, fig_cor_neoep), ncol = 2, nrow = 1, common.legend = T, legend = "right")
+
+ggsave(filename = "figures/fig1c_v5.jpg", width = 34, height = 19, units = "cm", dpi = "retina")
+```
+
+##Fig1D Scores per allele
+
+```{r}
+load("objects/tcell_filt")
+load("objects/tesla_data")
+
+tesla_data$allele = paste0("HLA-", tesla_data$allele)
+tcell_filt %<>% select(allele, peptide, bl62ssMax, dissim)
+tesla_data %<>% select(allele, peptide, bl62ssMax, dissim)
+
+data = rbind(tcell_filt, tesla_data)
+rm(tcell_filt, tesla_data)
+
+data %<>% mutate(locus = substr(allele, 5, 5))
+selalleles = data %>% add_count(allele, name = "allelefreq") %>% filter(allelefreq > 50) %>% pull(allele) %>% unique()
+
+```
+
+###BL62ssmax
+
+```{r}
+tempdf_bl62max = data %>% 
+  filter(allele %in% selalleles) %>% 
+  mutate(allele = fct_reorder(allele, bl62ssMax, median))
+kruskal.test(bl62ssMax~allele, tempdf_bl62max)$p.value
+
+ggplot(tempdf_bl62max, aes(x = allele, y = bl62ssMax, fill = locus)) + 
+  geom_boxplot(outlier.shape = NA, alpha=0.5) +
+  geom_jitter(mapping = aes(color = locus), size=0.4, alpha=0.9) +
+  annotate(geom = "text", x = 4.5, y = 1, label = "paste(italic(P), \" = 7.0 x \", 10 ^ -26)", parse = TRUE, color = "black", size = 4) +
+  scale_fill_manual(values = alpha(c("#DC0000B2","#3C5488B2"), .3)) +
+  scale_color_manual(values = c("#DC0000B2","#3C5488B2")) +
+  ylab("BLOSUM62 similarity score (max)") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 12, color = "black", angle = 90, vjust = .5),
+    axis.text.y = element_text(size = 12, color = "black"),
+    panel.border = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black"),
+    plot.margin = margin(7, 0, 6.5, 2, "cm")) -> fig_bl62ssmax
+
+
+
+```
+
+###Dissimilarity
+
+```{r}
+tempdf_dis = data %>% 
+  filter(allele %in% selalleles) %>% 
+  mutate(allele = fct_reorder(allele, dissim, median))
+kruskal.test(dissim~allele, tempdf_dis)$p.value
+tempdf_dis %<>% mutate(dissimM = dissim + min(tempdf_dis$dissim[tempdf_dis$dissim != 0]))
+
+ggplot(tempdf_dis, aes(x = allele, y = dissimM, fill = locus)) + 
+  geom_boxplot(outlier.shape = NA, alpha=0.5) +
+  geom_jitter(mapping = aes(color = locus), size = 0.4, alpha = 0.9) +
+  annotate(geom = "text", x = 4.5, y = 10, label = "paste(italic(P), \" = 4.2 x \", 10 ^ -5)", parse = TRUE, color = "black", size = 4) +
+  scale_fill_manual(values = alpha(c("#DC0000B2","#3C5488B2"), .3)) +
+  scale_color_manual(values = c("#DC0000B2","#3C5488B2")) +
+  scale_y_continuous(trans = "log10", breaks = c(1e-14,1e-12,1e-10,1e-8,1e-6,1e-4,0.01,1), labels = c(10^-14, 10^-12, 10^-10, 10^-8, 10^-6, 10^-4, 0.01, 1)) +
+  ylab("Dissimilarity") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 12, color = "black", angle = 90, vjust = .5),
+    axis.text.y = element_text(size = 12, color = "black"),
+    panel.border = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black"),
+    plot.margin = margin(7, 0, 6.5, 2, "cm")) -> fig_dissim
+
+ggarrange(plotlist = list(fig_bl62ssmax, fig_dissim), ncol = 1, nrow = 2)
+
+ggsave(filename = "figures/Fig1d_v2.jpg", width = 28, height = 28, units = "cm", dpi = "retina")
+
+```
 
